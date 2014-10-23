@@ -29,9 +29,8 @@ def main(argv=None):
 
     graph = build_graph(blast_handle=args.blast, bscol=args.bscol-1)
 
-    avgs = compute_organism_averages(graph=graph, idchar=args.idchar)
-
     if args.norm:
+        avgs = compute_organism_averages(graph=graph, idchar=args.idchar)
         normalize_graph(graph=graph, avgs=avgs, idchar=args.idchar)
 
     print_abc_file(graph=graph, abc=args.abc)
@@ -133,7 +132,7 @@ def build_graph(blast_handle, bscol=11):
             try:
                 graph[id1][id2] = bit
             except KeyError:
-                graph[id1] = dict(id2=bit)
+                graph[id1] = {id2:bit}
 
     return graph
 
@@ -163,7 +162,7 @@ def compute_organism_averages(graph, idchar='|'):
                 try:
                     avgs[orgA][orgB] = dict(cnt=1, sum=bit)
                 except KeyError:
-                    avgs[orgA] = dict(orgB=dict(cnt=1, sum=bit))
+                    avgs[orgA] = {orgB:dict(cnt=1, sum=bit)}
 
     for orgA, nbrs in avgs.iteritems():
         for orgB, stats in nbrs.iteritems():
