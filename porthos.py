@@ -31,19 +31,34 @@ def main(argv=None):
 
     args = get_parsed_args()
 
-    if args.node_list:
-        graph = initialize_graph(node_list=args.node_list)
-        node_list = True
+    if args.allowed:
+        graph = initialize_graph(allowed=args.allowed)
+        allowed = True
     else:
         graph = nx.Graph()
-        node_list = False
+        allowed = False
 
-    add_edges(graph=graph,
-              blast_handle=args.blast,
-              bscol=args.bscol-1,
-              min_cov=args.min_cov,
-              combine=args.combine,
-              node_list=node_list)
+    if args.disallowed:
+        disallowed = set(line.strip() for line in open(args.disallowed))
+        graph.remove_nodes_from(disallowed)
+    else:
+        graph = nx.Graph()
+        disallowed = False
+
+    if args.combine:
+        add_greedily_combined_edges(graph=graph,
+                                    blast_handle=args.blast,
+                                    bscol=args.bscol-1,
+                                    min_cov=args.min_cov,
+                                    allowed=allowed,
+                                    disallowed=disallowed)
+    else:
+        add_top_hit_edges(graph=graph,
+                          blast_handle=args.blast,
+                          bscol=args.bscol-1,
+                          min_cov=args.min_cov,
+                          allowed=allowed,
+                          disallowed=disallowed)
 
     if args.norm:
         avgs = compute_organism_averages(graph=graph, idchar=args.idchar)
@@ -108,11 +123,17 @@ def get_parsed_args():
                         help="Greedily combine bit scores from " +
                              "non-overlapping hits [def=False]")
 
-    parser.add_argument('--node_list',
-                        dest='node_list',
+    parser.add_argument('--allowed',
+                        dest='allowed',
                         action='store',
                         default=False,
-                        help="File containing a list of allowed nodes")
+                        help="File containing a list of acceptable nodes")
+
+    parser.add_argument('--disallowed',
+                        dest='disallowed',
+                        action='store',
+                        default=False,
+                        help="File containing a list of forbidden nodes")
 
     parser.add_argument('blast',
                         nargs='?',
@@ -133,14 +154,14 @@ def get_parsed_args():
     return args
 
 
-def initialize_graph(node_list=False):
+def initialize_graph(allowed=False):
     """
     """
     graph = nx.Graph()
 
-    if node_list:
+    if allowed:
         nodes = set()
-        for line in open(node_list):
+        for line in open(allowed):
             node = str(line.strip())
             if not node:  # skip blank lines
                 continue
@@ -152,29 +173,13 @@ def initialize_graph(node_list=False):
     return graph
 
 
-def add_edges(graph, blast_handle, bscol=11, min_cov=0.5, combine=False,
-              node_list=False):
+def add_greedily_combined_edges(graph, blast_handle, bscol=11, min_cov=0.5,
+              allowed=False, disallowed=False):
     """Construct a graph from the top BLAST hits
-
-    Bit scores from non-overlapping hits can be combined using simple addition,
-    however the identification of the set of non-overlapping hits that provides
-    the maximum score is an NP-complete problem. For this simple exemplary
-    program in which I'm trying to avoid using non-standard Python modules, I
-    decided not to tackle this aspect and am just using the top hits.
-
-    In order to avoid using either a NetworkX graph or a pair of dictionaries,
-    the query and subject identifiers are stored in lexicographical order.
-
-    :param blast_handle: An open file handle containing non-self-alignments
-        (can contain other alignments and/or comment lines beginning with a
-        hash '#' character)
-    :return graph: NetworkX graph containing BLAST a graph with edges weighted 
-        by bit scores
     """
-    if combine:
-        crnt_qry = None  # Current query sequence ID
-        crnt_ref = None  # Current reference sequence ID
-        hit_stack = []  # Stack of tuples with bit scores and coordinates
+    crnt_qry = None  # Current query sequence ID
+    crnt_ref = None  # Current reference sequence ID
+    hit_stack = []  # Stack of tuples with bit scores and coordinates
 
     for line in blast_handle:
         temp = line.strip().split()
@@ -188,59 +193,51 @@ def add_edges(graph, blast_handle, bscol=11, min_cov=0.5, combine=False,
         qry_id = str(temp[0])
         ref_id = str(temp[1])
 
-        if node_list:
+        if allowed:
             if not (graph.has_node(qry_id) and graph.has_node(ref_id)):
                 continue
 
-        id1, id2 = sorted([qry_id, ref_id])
+        elif disallowed:
+            if qry_id in disallowed or ref_id in disallowed:
+                continue
+
+        # This stack of commands just generates a tuple of alignment info
         bit = float(temp[bscol])
         id_frac = float(temp[2])/100
         aln_len = int(temp[3])
         id_sum = id_frac*aln_len
+        qry_coords = sorted([int(temp[6]), int(temp[7])])
+        ref_coords = sorted([int(temp[8]), int(temp[9])])
+        aln_info = tuple([bit, id_sum] + qry_coords + ref_coords)
 
-        if combine:
-            qry_coords = sorted([int(temp[6]), int(temp[7])])
-            ref_coords = sorted([int(temp[8]), int(temp[9])])
-            aln_info = tuple([bit, id_sum] + qry_coords + ref_coords)
-
-            if qry_id == crnt_qry and ref_id == crnt_ref:
-                hit_stack.append(aln_info)
-                continue
-            else:
-                crnt_qry = qry_id
-                crnt_ref = ref_id
-                min_len = min(int(temp[12]), int(temp[13]))
-                hit_count = len(hit_stack)
-
-                if hit_count > 1:
-                    score, id_sum = greedy_nonoverlapping_hits(
-                                        hit_stack, min_len)
-                elif hit_count == 1:
-                    score = bit
-                else:
-                    continue
-
-                cov = id_sum/min_len
-                hit_stack = [aln_info]
-
-        else:
-            score = bit
-            min_len = min(int(temp[12]), int(temp[13]))
-            cov = id_sum/min_len
-
-        if cov < min_cov:
+        # Keep adding alignment info to stack if the seqs are the same
+        if qry_id == crnt_qry and ref_id == crnt_ref:
+            hit_stack.append(aln_info)
             continue
 
-        try:
-            if score > graph[id1][id2]['bit']:
-                graph[id1][id2]['bit'] = score
-        except KeyError:
-            graph.add_edge(id1, id2, bit=score)
+        # If seqs change, process hit
+        else:
+            # ...unless it's the first hit in the filed
+            if len(hit_stack) > 0:
+                add_greedily_combined_hits(
+                    graph, crnt_qry, crnt_ref, hit_stack, min_len, min_cov)
 
-    # TODO: Add final edge if combine
+            # Set variables used for upcoming (set of) hit(s)
+            crnt_qry = qry_id
+            crnt_ref = ref_id
+            min_len = min(int(temp[12]), int(temp[13]))
+            hit_stack = [aln_info]
+
+    # Print final edge
+    if len(hit_stack) > 0:
+        add_greedily_combined_hits(
+            graph, crnt_qry, crnt_ref, hit_stack, min_len, min_cov)
 
 
-def greedy_nonoverlapping_hits(hit_stack, min_len):
+def add_greedily_combined_hits(
+        graph, qry_id, ref_id, hit_stack, min_len, min_cov):
+    """Greedily combine non-overlapping hits and add resulting edge to graph
+    """
     nolaps = None  # Coordinates for non-overlapping hits
     for aln_info in hit_stack:
         if not nolaps:
@@ -248,15 +245,67 @@ def greedy_nonoverlapping_hits(hit_stack, min_len):
             nlp_id_sum = hit_stack[0][1]
             nolaps = [hit_stack[0][2:]]
         else:            
-            bit, id_sum, qbeg1, qend1, rbeg1, rend1 = aln_info
+            bit, id_sum, qbeg1, qend1, rbeg1, rend1 = aln_info  # Candidate hit
             for nlp_info in nolaps:
-                qbeg2, qend2, rbeg2, rend2 = nlp_info
-                if qbeg1 > qend2 or qend1 < qbeg2:
-                    if rbeg1 > rend2 or rend1 < rbeg2:
+                qbeg2, qend2, rbeg2, rend2 = nlp_info  # Accepted hit
+                if qbeg1 > qend2 or qend1 < qbeg2:  # No overlap in query
+                    if rbeg1 > rend2 or rend1 < rbeg2:  # No overlap in ref
                         nlp_bit += bit
                         nlp_id_sum += id_sum
 
-    return nlp_bit, nlp_id_sum
+    # Make sure coverage (% identical bases) exceeds user-defined threshold
+    nlp_cov = nlp_id_sum / min_len
+    if nlp_cov >= min_cov:
+
+        # G[A][B] != G[B][A] in nx Graphs, so add edges in node-sorted order
+        id1, id2 = sorted([qry_id, ref_id])
+        try:
+            if nlp_bit > graph[id1][id2]['bit']:
+                graph[id1][id2]['bit'] = nlp_bit
+        except KeyError:
+            graph.add_edge(id1, id2, bit=nlp_bit)
+
+
+def add_top_hit_edges(graph, blast_handle, bscol=11, min_cov=0.5,
+              allowed=False, disallowed=False):
+    """Construct a graph from the top BLAST hits
+    """
+    for line in blast_handle:
+        temp = line.strip().split()
+        if not temp:  # skip blank lines
+            continue
+        elif temp[0][0] == "#":  # skip comment lines
+            continue
+        elif temp[0] == temp[1]:  # skip self-hits
+            continue
+
+        qry_id = str(temp[0])
+        ref_id = str(temp[1])
+
+        if allowed:
+            if not (graph.has_node(qry_id) and graph.has_node(ref_id)):
+                continue
+
+        elif disallowed:
+            if qry_id in disallowed or ref_id in disallowed:
+                continue
+
+        bit = float(temp[bscol])
+        id_frac = float(temp[2])/100
+        aln_len = int(temp[3])
+        id_sum = id_frac*aln_len
+        min_len = min(int(temp[12]), int(temp[13]))
+        cov = id_sum/min_len
+
+        if cov < min_cov:
+            continue
+
+        id1, id2 = sorted([qry_id, ref_id])
+        try:
+            if bit > graph[id1][id2]['bit']:
+                graph[id1][id2]['bit'] = bit
+        except KeyError:
+            graph.add_edge(id1, id2, bit=bit)
 
 
 def compute_organism_averages(graph, idchar='|'):
