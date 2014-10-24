@@ -205,8 +205,8 @@ def print_abc_file(graph, abc):
     :param graph: Dictionary containing BLAST graph weighted with bit scores
     :param abc: Open output file handle for "abc" graph
     """
-    for id1, nbrs in graph.iteritems():
-        for id2, bit in nbrs.iteritems():
+    for id1, nbrs in sorted(graph.iteritems()):
+        for id2, bit in sorted(nbrs.iteritems()):
             out_line = '\t'.join([id1, id2, str(bit)])+'\n'
             abc.write(out_line)
 
