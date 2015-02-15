@@ -12,7 +12,6 @@ import argparse
 # Third-party libraries
 import networkx as nx
 
-
 def main(argv=None):
     """Where the magic happens!
 
@@ -31,6 +30,13 @@ def main(argv=None):
 
     args = get_parsed_args()
 
+    # Check for sane runtime arguments and data
+    len_cols = argument_error_handling(args.blast)
+    if not len_cols:
+        min_cov = False
+    else:
+        min_cov = args.min_cov
+
     if args.allowed:
         graph = initialize_graph(allowed=args.allowed)
         allowed = True
@@ -48,15 +54,13 @@ def main(argv=None):
     if args.combine:
         add_greedily_combined_edges(graph=graph,
                                     blast_handle=args.blast,
-                                    bscol=args.bscol-1,
-                                    min_cov=args.min_cov,
+                                    min_cov=min_cov,
                                     allowed=allowed,
                                     disallowed=disallowed)
     else:
         add_top_hit_edges(graph=graph,
                           blast_handle=args.blast,
-                          bscol=args.bscol-1,
-                          min_cov=args.min_cov,
+                          min_cov=min_cov,
                           allowed=allowed,
                           disallowed=disallowed)
 
@@ -66,97 +70,8 @@ def main(argv=None):
 
     print_abc_file(graph=graph, abc=args.abc)
 
-
-def get_parsed_args():
-    """Parse the command line arguments
-
-    Parses command line arguments using the argparse package, which is a
-    standard Python module starting with version 2.7.
-
-    Args:
-        None, argparse fetches them from user input
-
-    Returns:
-        args: An argparse.Namespace object containing the parsed arguments
-    """
-    parser = argparse.ArgumentParser(
-        description="Generate a set of graphs from a tab-delimited BLASTP " +
-                    "or BLASTN file that contains the query and subject IDs " +
-                    "in the first two columns and the bit score in the " +
-                    "twelfth column, unless otherwise specified")
-
-    parser.add_argument('--idchar',
-                        dest='idchar',
-                        action='store',
-                        default='|',
-                        help="The character used to separate the organism " +
-                             "ID from the rest of the sequence header " +
-                             "[def='|']")
-
-    parser.add_argument('--bscol',
-                        dest='bscol',
-                        action='store',
-                        default=12,
-                        help="One-indexed column containing the bit scores " +
-                             "[def=12]")
-
-    parser.add_argument('--norm',
-                        dest='norm',
-                        action='store_true',
-                        default=False,
-                        help="Normalize edge weights using inter-organism " +
-                             "averages [def=False]")
-
-    parser.add_argument('--min_cov',
-                        dest='min_cov',
-                        type=float,
-                        action='store',
-                        default=0.5,
-                        help="Minimum fraction of characters in the shorter " +
-                             "sequence that must be aligned to identical " +
-                             "characters in the longer sequence [def=0.5]")
-
-    parser.add_argument('--combine',
-                        dest='combine',
-                        action='store_true',
-                        default=False,
-                        help="Greedily combine bit scores from " +
-                             "non-overlapping hits [def=False]")
-
-    parser.add_argument('--allowed',
-                        dest='allowed',
-                        action='store',
-                        default=False,
-                        help="File containing a list of acceptable nodes")
-
-    parser.add_argument('--disallowed',
-                        dest='disallowed',
-                        action='store',
-                        default=False,
-                        help="File containing a list of forbidden nodes")
-
-    parser.add_argument('blast',
-                        nargs='?',
-                        type=argparse.FileType('r'),
-                        default=sys.stdin,
-                        help="Tab-delimited BLAST file containing " +
-                             "additional columns for the query and sequence " +
-                             " lengths (comment lines are okay) [def=stdin]")
-
-    parser.add_argument('abc',
-                        nargs='?',
-                        type=argparse.FileType('w'),
-                        default=sys.stdout,
-                        help="'abc' output graph file [def=stdout]")
-
-    args = parser.parse_args()
-
-    return args
-
-
 def initialize_graph(allowed=False):
-    """
-    """
+    """Pre-populate a NetworkX graph with all allowed nodes"""
     graph = nx.Graph()
 
     if allowed:
@@ -172,11 +87,9 @@ def initialize_graph(allowed=False):
 
     return graph
 
-
-def add_greedily_combined_edges(graph, blast_handle, bscol=11, min_cov=0.5,
+def add_greedily_combined_edges(graph, blast_handle, min_cov=False,
               allowed=False, disallowed=False):
-    """Construct a graph from the top BLAST hits
-    """
+    """Construct a graph from the top BLAST hits"""
     crnt_qry = None  # Current query sequence ID
     crnt_ref = None  # Current reference sequence ID
     hit_stack = []  # Stack of tuples with bit scores and coordinates
@@ -202,7 +115,7 @@ def add_greedily_combined_edges(graph, blast_handle, bscol=11, min_cov=0.5,
                 continue
 
         # This stack of commands just generates a tuple of alignment info
-        bit = float(temp[bscol])
+        bit = float(temp[11])
         id_frac = float(temp[2])/100
         aln_len = int(temp[3])
         id_sum = id_frac*aln_len
@@ -225,19 +138,20 @@ def add_greedily_combined_edges(graph, blast_handle, bscol=11, min_cov=0.5,
             # Set variables used for upcoming (set of) hit(s)
             crnt_qry = qry_id
             crnt_ref = ref_id
-            min_len = min(int(temp[12]), int(temp[13]))
             hit_stack = [aln_info]
+            if min_cov:
+                min_len = min(int(temp[12]), int(temp[13]))
+            else:
+                min_len = False
 
     # Print final edge
     if len(hit_stack) > 0:
         add_greedily_combined_hits(
             graph, crnt_qry, crnt_ref, hit_stack, min_len, min_cov)
 
-
 def add_greedily_combined_hits(
-        graph, qry_id, ref_id, hit_stack, min_len, min_cov):
-    """Greedily combine non-overlapping hits and add resulting edge to graph
-    """
+        graph, qry_id, ref_id, hit_stack, min_len, min_cov=False):
+    """Greedily combine non-overlapping hits and add resulting edge to graph"""
     nolaps = None  # Coordinates for non-overlapping hits
     for aln_info in hit_stack:
         if not nolaps:
@@ -254,22 +168,22 @@ def add_greedily_combined_hits(
                         nlp_id_sum += id_sum
 
     # Make sure coverage (% identical bases) exceeds user-defined threshold
-    nlp_cov = nlp_id_sum / min_len
-    if nlp_cov >= min_cov:
+    if min_cov:
+        nlp_cov = nlp_id_sum / min_len
+        if nlp_cov < min_cov:
+            return
 
-        # G[A][B] != G[B][A] in nx Graphs, so add edges in node-sorted order
-        id1, id2 = sorted([qry_id, ref_id])
-        try:
-            if nlp_bit > graph[id1][id2]['bit']:
-                graph[id1][id2]['bit'] = nlp_bit
-        except KeyError:
-            graph.add_edge(id1, id2, bit=nlp_bit)
+    # G[A][B] != G[B][A] in nx Graphs, so add edges in node-sorted order
+    id1, id2 = sorted([qry_id, ref_id])
+    try:
+        if nlp_bit > graph[id1][id2]['bit']:
+            graph[id1][id2]['bit'] = nlp_bit
+    except KeyError:
+        graph.add_edge(id1, id2, bit=nlp_bit)
 
-
-def add_top_hit_edges(graph, blast_handle, bscol=11, min_cov=0.5,
+def add_top_hit_edges(graph, blast_handle, min_cov=False,
               allowed=False, disallowed=False):
-    """Construct a graph from the top BLAST hits
-    """
+    """Construct a graph from the top BLAST hits"""
     for line in blast_handle:
         temp = line.strip().split()
         if not temp:  # skip blank lines
@@ -290,15 +204,16 @@ def add_top_hit_edges(graph, blast_handle, bscol=11, min_cov=0.5,
             if qry_id in disallowed or ref_id in disallowed:
                 continue
 
-        bit = float(temp[bscol])
+        bit = float(temp[11])
         id_frac = float(temp[2])/100
         aln_len = int(temp[3])
         id_sum = id_frac*aln_len
-        min_len = min(int(temp[12]), int(temp[13]))
-        cov = id_sum/min_len
 
-        if cov < min_cov:
-            continue
+        if min_cov:
+            min_len = min(int(temp[12]), int(temp[13]))
+            cov = id_sum/min_len
+            if cov < min_cov:
+                continue
 
         id1, id2 = sorted([qry_id, ref_id])
         try:
@@ -306,7 +221,6 @@ def add_top_hit_edges(graph, blast_handle, bscol=11, min_cov=0.5,
                 graph[id1][id2]['bit'] = bit
         except KeyError:
             graph.add_edge(id1, id2, bit=bit)
-
 
 def compute_organism_averages(graph, idchar='|'):
     """Compute average scores between and within each pair of organisms
@@ -336,7 +250,6 @@ def compute_organism_averages(graph, idchar='|'):
 
     return avgs
 
-
 def normalize_graph(graph, avgs, idchar):
     """Normalize graph using inter- & intra-organism averages
 
@@ -356,7 +269,6 @@ def normalize_graph(graph, avgs, idchar):
         orgA, orgB = sorted([org1, org2])
         graph[id1][id2]['bit'] /= avgs[orgA][orgB]['avg']
 
-
 def print_abc_file(graph, abc):
     """Print graph file in "abc" format
 
@@ -373,9 +285,12 @@ def print_abc_file(graph, abc):
         out_line = '\t'.join([id1, id2, str(edata['bit'])])+'\n'
         abc.write(out_line)
 
-
 def print_connected_component_fasta_files(graph, fasta_handle, out_pref):
-    """
+    """Split FASTA file by connected component
+
+    TODO: Make this function accessible from the main interface because it can
+    be very useful for downstream analyses. The FASTA file could also be mined
+    for sequence lengths in cases where they are not included in the BLAST file.
     """
     from Bio import SeqIO
     fasta = SeqIO.to_dict(SeqIO.parse(fasta_handle, 'fasta'))
@@ -391,6 +306,243 @@ def print_connected_component_fasta_files(graph, fasta_handle, out_pref):
         cmp_hdl.close()
         cmp_cnt += 1
 
+def get_parsed_args():
+    """Parse the command line arguments
+
+    Parses command line arguments using the argparse package, which is a
+    standard Python module starting with version 2.7.
+
+    Args:
+        None, argparse fetches them from user input
+
+    Returns:
+        args: An argparse.Namespace object containing the parsed arguments
+    """
+    parser = argparse.ArgumentParser(
+        description=("Generate a set of graphs from a tab-delimited BLASTP or "
+        "BLASTN file that contains the query and subject IDs in the first two "
+        "columns and the bit score in the twelfth column, unless otherwise "
+        "specified"))
+
+    parser.add_argument('--idchar',
+                        dest='idchar',
+                        action='store',
+                        default='|',
+                        help=("The character used to separate the organism ID"
+                        "from the rest of the sequence header [def='|']"))
+
+    parser.add_argument('--norm',
+                        dest='norm',
+                        action='store_true',
+                        default=False,
+                        help=("Normalize edge weights using inter-organism "
+                        "averages [def=False]"))
+
+    parser.add_argument('--min_cov',
+                        dest='min_cov',
+                        type=float,
+                        action='store',
+                        default=False,
+                        help=("Minimum fraction (e.g. 0.5) of characters in "
+                        "the shorter sequence that must be aligned to "
+                        "identical characters in the longer sequence "
+                        "[def=False]"))
+
+    parser.add_argument('--combine',
+                        dest='combine',
+                        action='store_true',
+                        default=False,
+                        help=("Greedily combine bit scores from "
+                        "non-overlapping hits [def=False]"))
+
+    parser.add_argument('--allowed',
+                        dest='allowed',
+                        action='store',
+                        default=False,
+                        help="File containing a list of acceptable nodes")
+
+    parser.add_argument('--disallowed',
+                        dest='disallowed',
+                        action='store',
+                        default=False,
+                        help="File containing a list of forbidden nodes")
+
+    parser.add_argument('blast',
+                        nargs='?',
+                        type=argparse.FileType('r'),
+                        default=sys.stdin,
+                        help=("Tab-delimited BLAST file containing additional "
+                        "columns for the query and sequence lengths "
+                        "(comment lines are okay) [def=stdin]"))
+
+    parser.add_argument('abc',
+                        nargs='?',
+                        type=argparse.FileType('w'),
+                        default=sys.stdout,
+                        help="'abc' output graph file [def=stdout]")
+
+    args = parser.parse_args()
+
+    return args
+
+def argument_error_handling(blast):
+    """Check to make sure user has specified sane arguments
+
+    Check BLAST file for standard bit score column and non-standard sequence
+    length columns
+    """
+    len_cols = False
+
+    for line in blast:
+        if line[0] == '#':  # Skip comment lines
+            if line[2:8] == 'Fields':
+                header = line.strip().split(', ')
+
+                # Verify standard columns using BLAST header
+                standard_warning = ("Warning: It appears from the headers that "
+                    "the {0} is not listed in the {1} column. Execution will "
+                    "continue, although results may be incorrect.\n")
+
+                # Query sequence column
+                try:
+                    if not [i for i, word in enumerate(header)
+                            if word.endswith('query id')][0] == 0:
+                        sys.stderr.write(standard_warning.format(
+                            'query sequence ID', 'first'))
+                except IndexError:
+                    sys.stderr.write(standard_warning.format(
+                        'query sequence ID', 'first'))
+
+                # Subject sequence column
+                try:
+                    if not header.index('subject id') == 1:
+                        sys.stderr.write(standard_warning.format(
+                            'subject sequence ID', 'second'))
+                except ValueError:
+                    sys.stderr.write(standard_warning.format(
+                        'subject sequence ID', 'second'))
+
+                # Percent identity column
+                try:
+                    if not header.index('% identity') == 2:
+                        sys.stderr.write(standard_warning.format(
+                            '% identity', 'third'))
+                except ValueError:
+                    sys.stderr.write(standard_warning.format(
+                        '% identity', 'third'))
+
+                # Alignment length column
+                try:
+                    if not header.index('alignment length') == 3:
+                        sys.stderr.write(standard_warning.format(
+                            'alignment length', 'fourth'))
+                except ValueError:
+                    sys.stderr.write(standard_warning.format(
+                        'alignment length', 'fourth'))
+
+                # Column with index for starting position in query sequence
+                try:
+                    if not header.index('q. start') == 6:
+                        sys.stderr.write(standard_warning.format(
+                            'index for the start site in the query sequence',
+                            'seventh'))
+                except ValueError:
+                    sys.stderr.write(standard_warning.format(
+                        'index for the start site in the query sequence',
+                        'seventh'))
+
+                # Column with index for ending position in query sequence
+                try:
+                    if not header.index('q. end') == 7:
+                        sys.stderr.write(standard_warning.format(
+                            'index for the end site in the query sequence',
+                            'eighth'))
+                except ValueError:
+                    sys.stderr.write(standard_warning.format(
+                        'index for the end site in the query sequence',
+                        'eighth'))
+
+                # Column with index for starting position in subject sequence
+                try:
+                    if not header.index('s. start') == 8:
+                        sys.stderr.write(standard_warning.format(
+                            'index for the start site in the subject sequence',
+                            'ninth'))
+                except ValueError:
+                    sys.stderr.write(standard_warning.format(
+                        'index for the start site in the subject sequence',
+                        'ninth'))
+
+                # Column with index for ending position in subject sequence
+                try:
+                    if not header.index('s. end') == 9:
+                        sys.stderr.write(standard_warning.format(
+                            'index for the end site in the subject sequence',
+                            'tenth'))
+                except ValueError:
+                    sys.stderr.write(standard_warning.format(
+                        'index for the end site in the subject sequence',
+                        'tenth'))
+
+                # Bit score column
+                try:
+                    if not header.index('bit score') == 11:
+                        sys.stderr.write(standard_warning.format(
+                            'bit score', 'twelfth'))
+                except ValueError:
+                    sys.stderr.write(standard_warning.format(
+                        'bit score', 'twelfth'))
+
+                # Check for non-standard columns containing sequence lengths
+                len_col_warning =  ("Warning: It appears from the headers that "
+                    "the BLAST file does not contain columns for the query and "
+                    "subject sequence lengths. These are necessary for the "
+                    "percent match filter that requires a minimum fraction of "
+                    "the characters in the shorter sequence to be identically "
+                    "matched within a(n) (set of) alignment(s). The filter "
+                    "will therefore be disabled. To re-enable this feature, "
+                    "rerun BLAST with option -outfmt '<6/7> std qlen slen'.\n")
+
+                try:
+                    qlen_col = header.index('query length')
+                    slen_col = header.index('subject length')
+                    if qlen_col == 12 and slen_col == 13:
+                        len_cols = True
+                    else:
+                        sys.stderr.write(standard_warning)
+                except ValueError:
+                    sys.stderr.write(len_col_warning)
+
+                # Other tests are unnecessary when headers are present
+                break
+
+            else:
+                continue
+
+        elif not line.strip():  # Skip blank lines
+            continue
+
+        temp = line.strip().split()
+
+        if len(temp) < 12 and bscol == 12:
+            sys.stderr.write("Error: BLAST file does not appear to contain "
+            "all twelve standard tab-delimited columns. It is difficult to be "
+            "more specific without having header lines.\n")
+            raise
+        elif len(temp) < 14:
+            sys.stderr.write("Warning: BLAST file does not appear to contain "
+            "all sequence length information. In order to filter alignments by "
+            "coverage, BLAST must be re-executed using option -outfmt '<6/7> "
+            "std qlen slen'. Execution will continue without coverage "
+            "filter...\n")
+        else:
+            len_cols = True
+
+        break
+
+    blast.seek(0)
+
+    return len_cols
 
 if __name__ == "__main__":
     sys.exit(main())
