@@ -37,32 +37,16 @@ def main(argv=None):
     else:
         min_cov = args.min_cov
 
-    if args.allowed:
-        graph = initialize_graph(allowed=args.allowed)
-        allowed = True
-    else:
-        graph = nx.Graph()
-        allowed = False
-
-    if args.disallowed:
-        disallowed = set(line.strip() for line in open(args.disallowed))
-        graph.remove_nodes_from(disallowed)
-    else:
-        graph = nx.Graph()
-        disallowed = False
+    graph = nx.Graph()
 
     if args.combine:
         add_greedily_combined_edges(graph=graph,
                                     blast_handle=args.blast,
-                                    min_cov=min_cov,
-                                    allowed=allowed,
-                                    disallowed=disallowed)
+                                    min_cov=min_cov)
     else:
         add_top_hit_edges(graph=graph,
                           blast_handle=args.blast,
-                          min_cov=min_cov,
-                          allowed=allowed,
-                          disallowed=disallowed)
+                          min_cov=min_cov)
 
     if args.norm:
         avgs = compute_organism_averages(graph=graph, idchar=args.idchar)
@@ -70,26 +54,8 @@ def main(argv=None):
 
     print_abc_file(graph=graph, abc=args.abc)
 
-def initialize_graph(allowed=False):
-    """Pre-populate a NetworkX graph with all allowed nodes"""
-    graph = nx.Graph()
-
-    if allowed:
-        nodes = set()
-        for line in open(allowed):
-            node = str(line.strip())
-            if not node:  # skip blank lines
-                continue
-            nodes.add(node)
-
-        graph.add_nodes_from(list(nodes))
-        del nodes
-
-    return graph
-
-def add_greedily_combined_edges(graph, blast_handle, min_cov=False,
-              allowed=False, disallowed=False):
-    """Construct a graph from the top BLAST hits"""
+def add_greedily_combined_edges(graph, blast_handle, min_cov=False):
+    """Construct a graph by combining non-overlapping hits between each pair of sequences"""
     crnt_qry = None  # Current query sequence ID
     crnt_ref = None  # Current reference sequence ID
     hit_stack = []  # Stack of tuples with bit scores and coordinates
@@ -106,14 +72,6 @@ def add_greedily_combined_edges(graph, blast_handle, min_cov=False,
         qry_id = str(temp[0])
         ref_id = str(temp[1])
 
-        if allowed:
-            if not (graph.has_node(qry_id) and graph.has_node(ref_id)):
-                continue
-
-        elif disallowed:
-            if qry_id in disallowed or ref_id in disallowed:
-                continue
-
         # This stack of commands just generates a tuple of alignment info
         bit = float(temp[11])
         id_frac = float(temp[2])/100
@@ -123,19 +81,12 @@ def add_greedily_combined_edges(graph, blast_handle, min_cov=False,
         ref_coords = sorted([int(temp[8]), int(temp[9])])
         aln_info = tuple([bit, id_sum] + qry_coords + ref_coords)
 
-        # Keep adding alignment info to stack if the seqs are the same
+        # Keep adding alignment info to stack if the seqs remain the same
         if qry_id == crnt_qry and ref_id == crnt_ref:
             hit_stack.append(aln_info)
-            continue
 
-        # If seqs change, process hit
-        else:
-            # ...unless it's the first hit in the filed
-            if len(hit_stack) > 0:
-                add_greedily_combined_hits(
-                    graph, crnt_qry, crnt_ref, hit_stack, min_len, min_cov)
-
-            # Set variables used for upcoming (set of) hit(s)
+        # Catch first pair of seqs and initialize per-pair variables
+        elif not (crnt_qry and crnt_ref):
             crnt_qry = qry_id
             crnt_ref = ref_id
             hit_stack = [aln_info]
@@ -144,28 +95,48 @@ def add_greedily_combined_edges(graph, blast_handle, min_cov=False,
             else:
                 min_len = False
 
-    # Print final edge
+        # Process stack of hits if a seq changes
+        else:
+            greedily_combine_hits_into_edge(
+                graph, crnt_qry, crnt_ref, hit_stack, min_len, min_cov)
+
+            # Reset per-pair variables for next seq pair
+            crnt_qry = qry_id
+            crnt_ref = ref_id
+            hit_stack = [aln_info]
+            if min_cov:
+                min_len = min(int(temp[12]), int(temp[13]))
+            else:
+                min_len = False
+
+    # Process final seq pair
     if len(hit_stack) > 0:
-        add_greedily_combined_hits(
+        greedily_combine_hits_into_edge(
             graph, crnt_qry, crnt_ref, hit_stack, min_len, min_cov)
 
-def add_greedily_combined_hits(
+def greedily_combine_hits_into_edge(
         graph, qry_id, ref_id, hit_stack, min_len, min_cov=False):
     """Greedily combine non-overlapping hits and add resulting edge to graph"""
-    nolaps = None  # Coordinates for non-overlapping hits
-    for aln_info in hit_stack:
-        if not nolaps:
-            nlp_bit = hit_stack[0][0]
-            nlp_id_sum = hit_stack[0][1]
-            nolaps = [hit_stack[0][2:]]
-        else:            
+    # Remove information from first alignment and use it to initialize variables
+    bit, id_sum, qbeg1, qend1, rbeg1, rend1 = hit_stack.pop(0)
+    nlp_bit    = bit
+    nlp_id_sum = id_sum
+    nlp_coords = [[qbeg1, qend1, rbeg1, rend1]]
+
+    # If additional alignments exist, check if they overlap and add them
+    try:
+        for aln_info in hit_stack:
             bit, id_sum, qbeg1, qend1, rbeg1, rend1 = aln_info  # Candidate hit
-            for nlp_info in nolaps:
-                qbeg2, qend2, rbeg2, rend2 = nlp_info  # Accepted hit
-                if qbeg1 > qend2 or qend1 < qbeg2:  # No overlap in query
-                    if rbeg1 > rend2 or rend1 < rbeg2:  # No overlap in ref
-                        nlp_bit += bit
-                        nlp_id_sum += id_sum
+            for nlp_coord in nlp_coords:
+                qbeg2, qend2, rbeg2, rend2 = nlp_coord  # Coordinates for accepted hit
+                if qbeg1 > qend2 or qend1 < qbeg2:  # No conflicting overlaps in query
+                    if rbeg1 > rend2 or rend1 < rbeg2:  # No conflicting overlaps in ref
+                        nlp_bit    += bit     # Add bit score to seq pair
+                        nlp_id_sum += id_sum  # Add identical character count to seq pair
+
+    # Move along gracefully if there's only a single alignment for the seq pair
+    except IndexError:
+        pass
 
     # Make sure coverage (% identical bases) exceeds user-defined threshold
     if min_cov:
@@ -181,8 +152,7 @@ def add_greedily_combined_hits(
     except KeyError:
         graph.add_edge(id1, id2, bit=nlp_bit)
 
-def add_top_hit_edges(graph, blast_handle, min_cov=False,
-              allowed=False, disallowed=False):
+def add_top_hit_edges(graph, blast_handle, min_cov=False):
     """Construct a graph from the top BLAST hits"""
     for line in blast_handle:
         temp = line.strip().split()
@@ -195,14 +165,6 @@ def add_top_hit_edges(graph, blast_handle, min_cov=False,
 
         qry_id = str(temp[0])
         ref_id = str(temp[1])
-
-        if allowed:
-            if not (graph.has_node(qry_id) and graph.has_node(ref_id)):
-                continue
-
-        elif disallowed:
-            if qry_id in disallowed or ref_id in disallowed:
-                continue
 
         bit = float(temp[11])
         id_frac = float(temp[2])/100
@@ -223,9 +185,9 @@ def add_top_hit_edges(graph, blast_handle, min_cov=False,
             graph.add_edge(id1, id2, bit=bit)
 
 def compute_organism_averages(graph, idchar='|'):
-    """Compute average scores between and within each pair of organisms
+    """Compute symmetrical average scores between and within each pair of organisms
 
-    :param graph: Dictionary containing BLAST graph weighted with bit scores
+    :param graph: NetworkX Graph() containing BLAST graph weighted with bit scores
     :param idchar: Character used to separate organism identifier from the rest
         of the sequence identifier
     :return avgs: Dictionary containing the total number of edges between each
@@ -243,10 +205,14 @@ def compute_organism_averages(graph, idchar='|'):
             avgs[orgA][orgB]['cnt'] += 1
             avgs[orgA][orgB]['sum'] += edata['bit']
         except KeyError:
-            avgs.add_edge(orgA, orgB, cnt=1, sum=edata['bit'])
+            try:
+                avgs[orgA][orgB] = {'cnt': 1, 'sum': edata['bit']}
+            except KeyError:
+                avgs[orgA] = {orgB: {'cnt': 1, 'sum': edata['bit']}}
 
-    for id1, id2, edata in avgs.edges(data=True):
-        avgs[orgA][orgB]['avg'] = edata['sum']/edata['cnt']
+    for orgA, orgA_data in avgs.iteritems():
+        for orgB, inter_org_stats in orgA_data.iteritems():
+            avgs[orgA][orgB]['avg'] = inter_org_stats['sum']/inter_org_stats['cnt']
 
     return avgs
 
@@ -258,7 +224,7 @@ def normalize_graph(graph, avgs, idchar):
     weights into dimensionless multiples of the overall average graph edge
     weight.
 
-    :param graph: Dictionary containing BLAST graph weighted with bit scores
+    :param graph: NetworkX Graph() containing BLAST graph weighted with bit scores
     :param avgs: Dictionary containing the total number of edges between each
         pair of organisms, the cumulative sum of each metric, and the average
         score for each metric (one node per organism, one edge per pair)
@@ -354,18 +320,6 @@ def get_parsed_args():
                         default=False,
                         help=("Greedily combine bit scores from "
                         "non-overlapping hits [def=False]"))
-
-    parser.add_argument('--allowed',
-                        dest='allowed',
-                        action='store',
-                        default=False,
-                        help="File containing a list of acceptable nodes")
-
-    parser.add_argument('--disallowed',
-                        dest='disallowed',
-                        action='store',
-                        default=False,
-                        help="File containing a list of forbidden nodes")
 
     parser.add_argument('blast',
                         nargs='?',
